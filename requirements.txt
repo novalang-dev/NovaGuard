@@ -1,0 +1,6 @@
+# Windows 8.1 kullanıyorsan:
+# Python 3.10.11 kurulu olmalı (python.org/downloads/release/python-31011)
+
+psutil==5.9.8
+watchdog==3.0.0
+customtkinter==5.2.2
