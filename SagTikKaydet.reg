@@ -1,0 +1,8 @@
+Windows Registry Editor Version 5.00
+
+[HKEY_CLASSES_ROOT\*\shell\NovaGuardVirusTotal]
+@="NovaGuard ile VirusTotal'de Tara"
+"Icon"="C:\\Windows\\System32\\shell32.dll,78"
+
+[HKEY_CLASSES_ROOT\*\shell\NovaGuardVirusTotal\command]
+@="\"C:\\Users\\gecici1\\AppData\\Local\\Programs\\Python\\Python315\\pythonw.exe\" \"C:\\Users\\gecici1\\Desktop\\Projeler\\NovaGuard\\run.py\" --scan-vt \"%1\""

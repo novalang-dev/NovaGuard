@@ -1,262 +1,358 @@
 # -*- coding: utf-8 -*-
-"""NovaGuard arayüzü."""
+"""NovaGuard Ultimate - Modern Arayüz."""
 import os
-import socket
+import time
 import threading
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
+from PIL import Image, ImageDraw
 
-try:
-    import customtkinter as ctk
-    HAS_CTK = True
-except ImportError:
-    HAS_CTK = False
-    import tkinter as tk
-    from tkinter import ttk
+import customtkinter as ctk
 
-from core.signature_scanner import SignatureScanner
-from core.heuristic_scanner import HeuristicScanner
-from core.behavioral_shield import BehavioralShield
-from core.quarantine import QuarantineManager, ApprovalState
-from core.realtime import RealtimeProtector
-from core.updater import start_background as start_updater
-from core.config import (MOBILE_SERVER_PORT, WATCH_PATHS, QUARANTINE_DIR)
-from core.database import SignatureDB
-
-
-def local_ip():
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return "127.0.0.1"
+from core.risk_engine import risk_engine
+from core.quarantine import quarantine
+from core.realtime import RealtimeProtector, State, is_ignored
+from core.behavioral import BehavioralShield
+from core.database import db
+from core.vt_api import check_virustotal
+from ui.warning_popup import show_warning
 
 
 class NovaGuardUI:
     def __init__(self):
-        self.approval = ApprovalState()
-        self.qm = QuarantineManager(self.approval)
-        self.l1 = SignatureScanner()
-        self.l2 = HeuristicScanner()
-        self.l3 = BehavioralShield(alert_callback=self._on_behavior_alert)
-        self.rt = RealtimeProtector(WATCH_PATHS, self._realtime_scan)
         self.is_scanning = False
-        self._build_ui()
-        self.qm.start_server()
-        self.l3.start()
-        self.rt.start()
-        start_updater()
-        self.log(f"[OK] DB imza sayısı: {SignatureDB().count()}")
-        self.log(f"[OK] Onay sunucusu: http://{local_ip()}:{MOBILE_SERVER_PORT}")
+        self.scan_count = 0
+        self.threat_count = 0
 
-    # ---------- UI ----------
+        self.behavior = BehavioralShield(alert_callback=self._on_behavior_alert)
+        self.rt = RealtimeProtector(self._on_new_file)
+
+        self._build_ui()
+        self._start_services()
+        self._update_clock()
+
+    # ---------- UI KURULUMU ----------
     def _build_ui(self):
-        if HAS_CTK:
-            ctk.set_appearance_mode("dark")
-            self.root = ctk.CTk()
-            self.root.title("NovaGuard v0.2")
-            self.root.geometry("920x640")
-            ctk.CTkLabel(self.root, text="🛡️ NovaGuard",
-                         font=("Segoe UI", 24, "bold")).pack(pady=6)
-            self.status = ctk.CTkLabel(self.root, text="Hazır.")
-            self.status.pack(pady=2)
-            f = ctk.CTkFrame(self.root); f.pack(pady=6)
-            ctk.CTkButton(f, text="📁 Dizini Tara",
-                          command=self._ask_scan).grid(row=0, column=0, padx=4)
-            ctk.CTkButton(f, text="🔒 Karantina",
-                          command=self._show_q).grid(row=0, column=1, padx=4)
-            ctk.CTkButton(f, text="♻️ Geri Yükle",
-                          command=self._restore).grid(row=0, column=2, padx=4)
-            ctk.CTkButton(f, text="⚠️ Korumayı Kapat",
-                          command=self._disable,
-                          fg_color="#7a2020").grid(row=0, column=3, padx=4)
-            ctk.CTkButton(f, text="🔄 İmza Güncelle",
-                          command=self._manual_update).grid(row=0, column=4, padx=4)
-            self.progress = ctk.CTkProgressBar(self.root, width=820)
-            self.progress.set(0); self.progress.pack(pady=6)
-            self.log_box = ctk.CTkTextbox(self.root, width=860, height=420,
-                                          font=("Consolas", 11))
-            self.log_box.pack(pady=6)
+        ctk.set_appearance_mode("dark")
+        self.root = ctk.CTk()
+        self.root.title("NovaGuard Ultimate")
+        self.root.geometry("1050x720")
+        self.root.configure(fg_color="#0a0a0c")
+
+        # ---- HEADER ----
+        header = ctk.CTkFrame(self.root, fg_color="transparent", height=70)
+        header.pack(fill="x", padx=20, pady=(15, 5))
+
+        # --- YENİ LOGO ÇİZİMİ ---
+        logo_img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        d = ImageDraw.Draw(logo_img)
+        # Neon Mavi Kalkan
+        d.polygon([(32, 4), (56, 16), (56, 44), (32, 60), (8, 44), (8, 16)], fill="#00d2ff")
+        # Kalkanın içindeki siyah detay
+        d.rectangle([28, 20, 36, 44], fill="#0a0a0c")
+        d.rectangle([22, 20, 42, 26], fill="#0a0a0c")
+        
+        # Resmi Tkinter formatına çevir
+        self.logo_ctk = ctk.CTkImage(light_image=logo_img, dark_image=logo_img, size=(36, 36))
+        
+        # Logoyu ve yazıyı ekrana bas
+        ctk.CTkLabel(header, image=self.logo_ctk, text="").pack(side="left", padx=(0, 10))
+        ctk.CTkLabel(header, text="NovaGuard", font=("Segoe UI", 28, "bold"), text_color="#ffffff").pack(side="left")
+        ctk.CTkLabel(header, text="ULTIMATE", font=("Segoe UI", 12, "bold"), text_color="#ffaa00").pack(side="left", padx=10, pady=(10, 0))
+
+        # Sağ üst: Oyun Modu + Saat
+        right_frame = ctk.CTkFrame(header, fg_color="transparent")
+        right_frame.pack(side="right")
+
+        self.game_var = ctk.BooleanVar(value=False)
+        ctk.CTkSwitch(right_frame, text="🎮 Oyun Modu", variable=self.game_var, command=self._toggle_game, progress_color="#ff8c00", font=("Segoe UI", 12, "bold")).pack(side="left", padx=15)
+
+        self.clock = ctk.CTkLabel(right_frame, text="00:00:00", font=("Consolas", 14, "bold"), text_color="#888899")
+        self.clock.pack(side="left", padx=10)
+
+        # ---- DURUM PANELİ ----
+        status = ctk.CTkFrame(self.root, fg_color="#121216", corner_radius=12, height=70)
+        status.pack(fill="x", padx=20, pady=8)
+        status.pack_propagate(False)
+
+        self.lbl_status = ctk.CTkLabel(status, text="● Sistem Aktif", font=("Segoe UI", 14, "bold"), text_color="#00ff88")
+        self.lbl_status.pack(side="left", padx=20)
+
+        self.lbl_stats = ctk.CTkLabel(status, text="Taranan: 0 | Tehdit: 0", font=("Segoe UI", 12), text_color="#888899")
+        self.lbl_stats.pack(side="right", padx=20)
+
+        # ---- SEKMELER ----
+        self.tabs = ctk.CTkTabview(self.root, fg_color="#121216", corner_radius=15)
+        self.tabs.pack(fill="both", expand=True, padx=20, pady=(0, 15))
+
+        self.tab_scan = self.tabs.add("📁 Tarama & Loglar")
+        self.tab_quar = self.tabs.add("🔒 Karantina")
+        self.tab_hist = self.tabs.add("📜 Geçmiş")
+        self.tab_settings = self.tabs.add("⚙️ Ayarlar")
+
+        self._build_tab_scan()
+        self._build_tab_quarantine()
+        self._build_tab_history()
+        self._build_tab_settings()
+
+        self.root.protocol("WM_DELETE_WINDOW", self.root.withdraw)
+
+    def _build_tab_scan(self):
+        f = ctk.CTkFrame(self.tab_scan, fg_color="transparent")
+        f.pack(fill="x", pady=10)
+
+        ctk.CTkButton(f, text="📁 Dizin Tara", width=140, height=40, fg_color="#0055ff", hover_color="#0044cc", font=("Segoe UI", 13, "bold"), command=self._ask_scan).pack(side="left", padx=5)
+        ctk.CTkButton(f, text="📄 Dosya Tara", width=140, height=40, fg_color="#1f1f24", hover_color="#2a2a30", command=self._ask_file_scan).pack(side="left", padx=5)
+        ctk.CTkButton(f, text="🌐 VirusTotal (Manuel)", width=180, height=40, fg_color="#6a1b9a", hover_color="#8e24aa", command=self._ask_vt).pack(side="left", padx=5)
+
+        self.progress = ctk.CTkProgressBar(self.tab_scan, height=8, progress_color="#00d2ff")
+        self.progress.set(0)
+        self.progress.pack(fill="x", pady=8)
+
+        self.log_box = ctk.CTkTextbox(self.tab_scan, font=("Consolas", 12), fg_color="#050505", text_color="#00ff88", border_width=0)
+        self.log_box.pack(fill="both", expand=True)
+
+    def _build_tab_quarantine(self):
+        top = ctk.CTkFrame(self.tab_quar, fg_color="transparent")
+        top.pack(fill="x", pady=10)
+        ctk.CTkButton(top, text="🔄 Yenile", width=120, command=self._load_quarantine_list).pack(side="left", padx=5)
+        self.quar_list = ctk.CTkScrollableFrame(self.tab_quar, fg_color="#050505")
+        self.quar_list.pack(fill="both", expand=True, pady=10)
+
+    def _build_tab_history(self):
+        top = ctk.CTkFrame(self.tab_hist, fg_color="transparent")
+        top.pack(fill="x", pady=10)
+        ctk.CTkButton(top, text="🔄 Yenile", width=120, command=self._load_history).pack(side="left", padx=5)
+        self.hist_box = ctk.CTkTextbox(self.tab_hist, font=("Consolas", 11), fg_color="#050505")
+        self.hist_box.pack(fill="both", expand=True, pady=10)
+
+    def _build_tab_settings(self):
+        ctk.CTkLabel(self.tab_settings, text="İstisna Klasörler (Buralar Taranmaz)", font=("Segoe UI", 14, "bold")).pack(pady=10)
+        self.ignore_box = ctk.CTkTextbox(self.tab_settings, height=150, font=("Consolas", 11))
+        self.ignore_box.pack(fill="x", padx=20, pady=10)
+
+        from core.config import IGNORE_PATHS
+        self.ignore_box.insert("end", "\n".join(IGNORE_PATHS))
+
+        ctk.CTkButton(self.tab_settings, text="💾 Kaydet", fg_color="#238636", hover_color="#2ea043", command=self._save_ignores).pack(pady=10)
+
+        # KALDIRMA BUTONU
+        ctk.CTkLabel(self.tab_settings, text="").pack() 
+        ctk.CTkButton(self.tab_settings, text="🗑️ NovaGuard'ı Kaldır", fg_color="#da3633", hover_color="#f85149", command=self._uninstall).pack(pady=20)
+
+    # ---------- KALDIRMA İŞLEMİ ----------
+    def _uninstall(self):
+        cevap = messagebox.askyesno("Kaldır", "NovaGuard'ı kaldırmak istediğinize emin misiniz?\nTüm başlangıç kayıtları silinecek ve koruma kapatılacak.")
+        if cevap:
+            try:
+                import winreg
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
+                winreg.DeleteValue(key, "NovaGuardUltimate")
+                winreg.CloseKey(key)
+            except Exception:
+                pass
+            
+            messagebox.showinfo("Kaldırıldı", "Başlangıç kaydı silindi. Program kapatılıyor. Şimdi klasörü silebilirsiniz.")
+            self.root.after(0, self.root.destroy)
+
+    # ---------- SERVİSLER ----------
+    def _start_services(self):
+        self.behavior.start()
+        self.rt.start()
+        self.log("✅ NovaGuard başlatıldı.")
+        self.log(f"📊 Veritabanı Hazır.")
+
+    def _toggle_game(self):
+        State.game_mode = self.game_var.get()
+        if State.game_mode:
+            self.log("🎮 OYUN MODU AKTİF: Arka plan tarama yavaşlatıldı.")
+            self.lbl_status.configure(text="🎮 Oyun Modu", text_color="#ff8c00")
         else:
-            self.root = tk.Tk()
-            self.root.title("NovaGuard v0.2")
-            self.root.geometry("920x640")
-            self.root.configure(bg="#0e1116")
-            tk.Label(self.root, text="🛡️ NovaGuard", fg="#58a6ff",
-                     bg="#0e1116", font=("Segoe UI", 20, "bold")).pack(pady=6)
-            self.status = tk.Label(self.root, text="Hazır.",
-                                   bg="#0e1116", fg="#e6edf3")
-            self.status.pack()
-            f = tk.Frame(self.root, bg="#0e1116"); f.pack(pady=6)
-            tk.Button(f, text="Dizini Tara", command=self._ask_scan).grid(row=0, column=0, padx=4)
-            tk.Button(f, text="Karantina", command=self._show_q).grid(row=0, column=1, padx=4)
-            tk.Button(f, text="Geri Yükle", command=self._restore).grid(row=0, column=2, padx=4)
-            tk.Button(f, text="Korumayı Kapat", command=self._disable,
-                      bg="#7a2020", fg="white").grid(row=0, column=3, padx=4)
-            tk.Button(f, text="İmza Güncelle",
-                      command=self._manual_update).grid(row=0, column=4, padx=4)
-            self.progress = ttk.Progressbar(self.root, length=820, mode="determinate")
-            self.progress.pack(pady=6)
-            self.log_box = tk.Text(self.root, width=110, height=22,
-                                   bg="#161b22", fg="#e6edf3",
-                                   font=("Consolas", 10), bd=0)
-            self.log_box.pack(pady=6)
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+            self.log("⚡ OYUN MODU KAPALI: Tam koruma aktif.")
+            self.lbl_status.configure(text="● Sistem Aktif", text_color="#00ff88")
 
     def log(self, msg):
         def _a():
-            try:
-                self.log_box.insert("end", msg + "\n")
-                self.log_box.see("end")
-            except Exception:
-                pass
-        try:
-            self.root.after(0, _a)
-        except Exception:
-            print(msg)
+            t = time.strftime("%H:%M:%S")
+            self.log_box.insert("end", f"[{t}] {msg}\n")
+            self.log_box.see("end")
+        self.root.after(0, _a)
 
-    def _status(self, t):
+    def _update_clock(self):
         try:
-            if HAS_CTK:
-                self.status.configure(text=t)
-            else:
-                self.status.config(text=t)
+            self.clock.configure(text=time.strftime("%H:%M:%S"))
         except Exception:
             pass
+        self.root.after(1000, self._update_clock)
 
-    # ---------- Tarama ----------
+    def _update_stats(self):
+        self.lbl_stats.configure(text=f"Taranan: {self.scan_count} | Tehdit: {self.threat_count}")
+
+    # ---------- TARAMA ----------
     def _ask_scan(self):
-        p = filedialog.askdirectory(title="Klasör seç")
-        if not p:
-            return
-        threading.Thread(target=self._scan_dir, args=(p,), daemon=True).start()
+        p = filedialog.askdirectory(title="Taranacak klasörü seç")
+        if p:
+            threading.Thread(target=self._scan_dir, args=(p,), daemon=True).start()
 
-    def _prog(self, c, t):
-        pct = c / t if t else 0
-        def _s():
-            try:
-                if HAS_CTK:
-                    self.progress.set(pct)
-                else:
-                    self.progress["value"] = pct * 100
-            except Exception:
-                pass
-        try:
-            self.root.after(0, _s)
-        except Exception:
-            pass
+    def _ask_file_scan(self):
+        p = filedialog.askopenfilename(title="Taranacak dosyayı seç")
+        if p:
+            threading.Thread(target=self._process_file, args=(p, False, False), daemon=True).start()
 
-    def _scan_dir(self, path):
+    def _scan_dir(self, root_path):
         if self.is_scanning:
-            self.log("[UI] Tarama var.")
+            self.log("⚠️ Zaten tarama devam ediyor.")
             return
         self.is_scanning = True
-        self._status("L1 imza taraması...")
+        self.log(f"🚀 Tarama başladı: {root_path}")
+
+        files = []
         try:
-            f1 = self.l1.scan_directory(path, self._prog)
-            for f in f1:
-                self.log(f"[L1] 🦠 {f['name']} → {f['path']}")
-                self._q_file(f)
-            self._status("L2 sezgisel tarama...")
-            f2 = self.l2.scan_directory(path, self._prog)
-            for f in f2:
-                self.log(f"[L2] 🦠 {f['name']} → {f['path']}")
-                self._q_file(f)
-            self.log(f"[UI] ✅ Bitti. Toplam: {len(f1) + len(f2)}")
-            self._status(f"Tarama tamam: {len(f1) + len(f2)}")
+            for r, _, fs in os.walk(root_path):
+                if is_ignored(r):
+                    continue
+                for f in fs:
+                    files.append(os.path.join(r, f))
         except Exception as e:
-            self.log(f"[UI] hata: {e}")
-        finally:
+            self.log(f"❌ Dizin hatası: {e}")
             self.is_scanning = False
-
-    def _realtime_scan(self, path):
-        """Watchdog yeni dosyada çağırır — hızlı tarama + karantina."""
-        try:
-            t, name, lvl, sha = self.l1.scan_file(path)
-            if t:
-                self.log(f"[RT-L1] 🦠 {name} → {path}")
-                self._q_file({"path": path, "name": name,
-                              "sha256": sha, "layer": 1})
-                return
-            t2, reasons, lvl2 = self.l2.scan_file(path)
-            if t2:
-                self.log(f"[RT-L2] 🦠 {', '.join(reasons)} → {path}")
-                self._q_file({"path": path, "name": ", ".join(reasons),
-                              "sha256": sha or "", "layer": 2})
-        except Exception as e:
-            print(f"[RT] {e}")
-
-    def _q_file(self, f):
-        r = self.qm.quarantine(f["path"], f["name"],
-                               f.get("sha256") or "", f["layer"])
-        if r.get("ok"):
-            self.log(f"[L4] 🔒 {r['path']}")
-        else:
-            self.log(f"[L4] ⚠️ {r.get('error')}")
-
-    # ---------- Davranış ----------
-    def _on_behavior_alert(self, e):
-        mem = f" | MEM: {e['memory_hits']}" if e.get("memory_hits") else ""
-        self.log(f"[L3] ⚠️ PID {e['pid']} ({e['name']}) — {e['reason']}{mem}")
-
-    # ---------- Karantina ----------
-    def _show_q(self):
-        m = self.qm.list_all()
-        self.log("---- KARANTİNA ----")
-        if not m:
-            self.log("(boş)")
-        for k, v in m.items():
-            self.log(f"• {k} | {v['threat']} | eski: {v['original_path']}")
-        self.log("---------------------")
-
-    def _restore(self):
-        m = self.qm.list_all()
-        if not m:
-            self.log("[UI] Karantina boş.")
             return
-        qname = list(m.keys())[0]
-        self.log(f"[UI] Onay isteniyor: {qname}")
-        threading.Thread(target=self._do_restore, args=(qname,),
-                         daemon=True).start()
 
-    def _do_restore(self, qname):
-        r = self.qm.restore(qname)
-        if r.get("ok"):
-            self.log(f"[L4] ✅ Geri yüklendi: {r['to']}")
+        total = len(files)
+        self.log(f"📁 Toplam {total} dosya bulundu.")
+
+        for i, fp in enumerate(files, 1):
+            self._process_file(fp, is_realtime=False, silent=True)
+            if i % 20 == 0 or i == total:
+                self.progress.set(i / total if total else 0)
+
+        self.progress.set(0)
+        self.log(f"✅ Tarama tamam. Tehdit: {self.threat_count}")
+        self.is_scanning = False
+
+    def _process_file(self, path, is_realtime, silent=False):
+        self.scan_count += 1
+        self._update_stats()
+
+        score, reasons = risk_engine.analyze(path)
+        if score == 0:
+            if not silent:
+                self.log(f"✅ Temiz: {os.path.basename(path)}")
+            return
+
+        filename = os.path.basename(path)
+        reason_str = ", ".join(reasons)
+
+        if score >= 80:
+            self.log(f"🦠 KESİN TEHDİT: {filename} (Risk: {score})")
+            self.log(f"   Sebep: {reason_str}")
+            res = quarantine.quarantine(path, reason_str, score)
+            if res["ok"]:
+                self.threat_count += 1
+                self._update_stats()
+                self.log(f"🔒 Karantinaya alındı: {res['qname']}")
+                db.add_history(filename, path, reason_str, score, "Karantina")
+
+        elif score >= 40:
+            self.log(f"⚠️ ŞÜPHELİ DOSYA: {filename} (Risk: {score})")
+            action = show_warning(filename, reason_str, score)
+            
+            if action == "block":
+                res = quarantine.quarantine(path, reason_str, score)
+                if res["ok"]:
+                    self.threat_count += 1
+                    self._update_stats()
+                    self.log(f"🔒 Kullanıcı karantinaya aldı: {res['qname']}")
+                    db.add_history(filename, path, reason_str, score, "Kullanıcı Karantinası")
+            else:
+                self.log(f"⚠️ Kullanıcı dosyayı çalıştırmayı seçti: {filename}")
+                db.add_history(filename, path, reason_str, score, "İzin Verildi")
         else:
-            self.log(f"[L4] ❌ {r}")
+            self.log(f"ℹ️ Düşük Riskli: {filename} (Risk: {score})")
+            db.add_history(filename, path, reason_str, score, "Düşük Risk")
 
-    def _disable(self):
-        threading.Thread(target=self._do_disable, daemon=True).start()
+    def _on_new_file(self, path):
+        self._process_file(path, is_realtime=True)
 
-    def _do_disable(self):
-        r = self.qm.disable_protection()
-        self.log("[L4] ⚠️ Koruma kapandı." if r["ok"]
-                 else "[L4] ❌ Kapatma reddedildi.")
+    def _on_behavior_alert(self, event):
+        msg = f"⚠️ Davranış: PID {event['pid']} ({event['name']}) - {event['reason']}"
+        self.log(msg)
+        db.add_history(event["name"], f"PID {event['pid']}", event["reason"], 50, "Davranış")
 
-    # ---------- Güncelleme ----------
-    def _manual_update(self):
-        self.log("[UI] İmza güncelleme başladı...")
-        threading.Thread(target=self._do_update, daemon=True).start()
+    # ---------- VIRUSTOTAL ----------
+    def _ask_vt(self):
+        p = filedialog.askopenfilename(title="VirusTotal'de taranacak dosya")
+        if not p:
+            return
+        self.log(f"🌐 VirusTotal sorgulanıyor: {os.path.basename(p)}")
+        threading.Thread(target=self._do_vt, args=(p,), daemon=True).start()
 
-    def _do_update(self):
-        try:
-            from core.updater import update_once
-            update_once()
-            self.log(f"[UI] ✅ DB toplam: {SignatureDB().count()}")
-        except Exception as e:
-            self.log(f"[UI] ❌ güncelleme: {e}")
+    def _do_vt(self, path):
+        result = check_virustotal(path)
+        self.log(result.replace("\n", " | "))
 
-    # ---------- Kapat ----------
-    def _on_close(self):
-        try:
-            self.rt.stop()
-            self.l3.stop()
-            self.qm.stop_server()
-        finally:
-            self.root.destroy()
+    # ---------- KARANTİNA ----------
+    def _load_quarantine_list(self):
+        for w in self.quar_list.winfo_children():
+            w.destroy()
+
+        items = quarantine.list_all()
+        if not items:
+            ctk.CTkLabel(self.quar_list, text="(Karantina boş)", text_color="#888899").pack(pady=20)
+            return
+
+        for qname, meta in items.items():
+            row = ctk.CTkFrame(self.quar_list, fg_color="#1a1a20", corner_radius=8)
+            row.pack(fill="x", pady=4, padx=5)
+
+            info = ctk.CTkFrame(row, fg_color="transparent")
+            info.pack(side="left", fill="x", expand=True, padx=10, pady=8)
+
+            ctk.CTkLabel(info, text=f"🦠 {meta.get('threat', 'Bilinmeyen')[:60]}", font=("Segoe UI", 12, "bold"), text_color="#ff5555", anchor="w").pack(fill="x")
+            ctk.CTkLabel(info, text=f"Eski konum: {meta.get('original_path', '-')}", font=("Consolas", 10), text_color="#888899", anchor="w").pack(fill="x")
+            ctk.CTkLabel(info, text=f"Risk: {meta.get('risk', 0)}/100", font=("Segoe UI", 10), text_color="#ffaa00", anchor="w").pack(fill="x")
+
+            btns = ctk.CTkFrame(row, fg_color="transparent")
+            btns.pack(side="right", padx=10)
+
+            ctk.CTkButton(btns, text="♻️", width=40, height=32, fg_color="#238636", command=lambda q=qname: self._restore_file(q)).pack(pady=2)
+            ctk.CTkButton(btns, text="🗑️", width=40, height=32, fg_color="#7a2020", command=lambda q=qname: self._delete_file(q)).pack(pady=2)
+
+    def _restore_file(self, qname):
+        r = quarantine.restore(qname)
+        if r["ok"]:
+            self.log(f"✅ Geri yüklendi: {r['to']}")
+            self._load_quarantine_list()
+        else:
+            self.log(f"❌ Hata: {r.get('error')}")
+
+    def _delete_file(self, qname):
+        r = quarantine.delete_forever(qname)
+        if r["ok"]:
+            self.log(f"🗑️ Kalıcı silindi: {qname}")
+            self._load_quarantine_list()
+
+    # ---------- GEÇMİŞ ----------
+    def _load_history(self):
+        self.hist_box.delete("1.0", "end")
+        rows = db.get_history()
+        if not rows:
+            self.hist_box.insert("end", "(Geçmiş boş)\n")
+            return
+        for r in rows:
+            self.hist_box.insert("end", f"[{r[0]}] {r[1]}\n  Tehdit: {r[2]} | Risk: {r[3]} | Aksiyon: {r[4]}\n\n")
+
+    # ---------- AYARLAR ----------
+    def _save_ignores(self):
+        from core.config import IGNORE_PATHS
+        paths = self.ignore_box.get("1.0", "end").strip().split("\n")
+        IGNORE_PATHS.clear()
+        for p in paths:
+            p = p.strip()
+            if p:
+                IGNORE_PATHS.append(p)
+        self.log(f"✅ İstisna listesi güncellendi ({len(IGNORE_PATHS)} giriş).")
 
     def run(self):
+        self._load_quarantine_list()
+        self._load_history()
         self.root.mainloop()
