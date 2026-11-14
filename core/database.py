@@ -1,88 +1,78 @@
 # -*- coding: utf-8 -*-
-"""SQLite imza veritabanı."""
 import sqlite3
 import threading
-import hashlib
-from core.config import DB_PATH
+import time
+from core.config import DB_PATH, HISTORY_DB_PATH
 
-
-class SignatureDB:
+class DatabaseManager:
     _lock = threading.Lock()
 
-    def __init__(self, path=DB_PATH):
-        self.path = path
-        self._init_db()
+    def __init__(self):
+        self._init_signatures()
+        self._init_history()
 
-    def _connect(self):
-        conn = sqlite3.connect(self.path, timeout=10)
+    def _connect(self, db_path):
+        conn = sqlite3.connect(db_path, timeout=10)
         conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
         return conn
 
-    def _init_db(self):
+    def _init_signatures(self):
         with self._lock:
-            conn = self._connect()
-            try:
-                conn.execute("""
-                    CREATE TABLE IF NOT EXISTS signatures (
-                        sha256 TEXT PRIMARY KEY,
-                        name   TEXT NOT NULL,
-                        level  INTEGER DEFAULT 1
-                    )
-                """)
-                conn.commit()
-            except Exception as e:
-                print(f"[DB] Init: {e}")
-            finally:
-                conn.close()
-
-    def add_many(self, rows):
-        """rows: [(sha256, name, level), ...] — hızlı toplu ekleme."""
-        if not rows:
-            return 0
-        with self._lock:
-            try:
-                conn = self._connect()
-                conn.executemany(
-                    "INSERT OR IGNORE INTO signatures(sha256,name,level) VALUES (?,?,?)",
-                    rows
+            conn = self._connect(DB_PATH)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS signatures (
+                    sha256 TEXT PRIMARY KEY, name TEXT, level INTEGER
                 )
-                conn.commit()
-                n = conn.total_changes
-                conn.close()
-                return n
-            except Exception as e:
-                print(f"[DB] add_many: {e}")
-                return 0
+            """)
+            conn.commit()
+            conn.close()
 
-    def lookup(self, sha256):
+    def _init_history(self):
+        with self._lock:
+            conn = self._connect(HISTORY_DB_PATH)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    time TEXT, filename TEXT, path TEXT, 
+                    threat_name TEXT, risk_score INTEGER, action TEXT
+                )
+            """)
+            conn.commit()
+            conn.close()
+
+    # --- İmza İşlemleri ---
+    def get_signature(self, sha256):
         try:
-            conn = self._connect()
-            cur = conn.execute(
-                "SELECT name, level FROM signatures WHERE sha256=?", (sha256,)
-            )
+            conn = self._connect(DB_PATH)
+            cur = conn.execute("SELECT name, level FROM signatures WHERE sha256=?", (sha256,))
             row = cur.fetchone()
             conn.close()
             return row
-        except Exception:
-            return None
+        except: return None
 
-    def count(self):
-        try:
-            conn = self._connect()
-            n = conn.execute("SELECT COUNT(*) FROM signatures").fetchone()[0]
+    def add_signatures(self, rows):
+        if not rows: return
+        with self._lock:
+            conn = self._connect(DB_PATH)
+            conn.executemany("INSERT OR IGNORE INTO signatures(sha256, name, level) VALUES (?,?,?)", rows)
+            conn.commit()
             conn.close()
-            return n
-        except Exception:
-            return 0
 
+    # --- Geçmiş İşlemleri ---
+    def add_history(self, filename, path, threat_name, risk_score, action):
+        t = time.strftime("%Y-%m-%d %H:%M:%S")
+        with self._lock:
+            conn = self._connect(HISTORY_DB_PATH)
+            conn.execute("INSERT INTO history (time, filename, path, threat_name, risk_score, action) VALUES (?,?,?,?,?,?)",
+                         (t, filename, path, threat_name, risk_score, action))
+            conn.commit()
+            conn.close()
 
-def sha256_of_file(path, chunk_size=4096):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        while True:
-            c = f.read(chunk_size)
-            if not c:
-                break
-            h.update(c)
-    return h.hexdigest()
+    def get_history(self):
+        conn = self._connect(HISTORY_DB_PATH)
+        cur = conn.execute("SELECT time, filename, threat_name, risk_score, action FROM history ORDER BY id DESC LIMIT 100")
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+
+db = DatabaseManager()
