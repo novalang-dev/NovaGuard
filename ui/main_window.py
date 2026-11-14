@@ -4,7 +4,7 @@ import os
 import time
 import threading
 from tkinter import filedialog, messagebox
-from PIL import Image, ImageDraw
+from PIL import Image
 
 import customtkinter as ctk
 
@@ -15,6 +15,7 @@ from core.behavioral import BehavioralShield
 from core.database import db
 from core.vt_api import check_virustotal
 from ui.warning_popup import show_warning
+from core.config import IGNORE_PATHS, save_ignores, BASE_DIR
 
 
 class NovaGuardUI:
@@ -42,20 +43,15 @@ class NovaGuardUI:
         header = ctk.CTkFrame(self.root, fg_color="transparent", height=70)
         header.pack(fill="x", padx=20, pady=(15, 5))
 
-        # --- YENİ LOGO ÇİZİMİ ---
-        logo_img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-        d = ImageDraw.Draw(logo_img)
-        # Neon Mavi Kalkan
-        d.polygon([(32, 4), (56, 16), (56, 44), (32, 60), (8, 44), (8, 16)], fill="#00d2ff")
-        # Kalkanın içindeki siyah detay
-        d.rectangle([28, 20, 36, 44], fill="#0a0a0c")
-        d.rectangle([22, 20, 42, 26], fill="#0a0a0c")
-        
-        # Resmi Tkinter formatına çevir
-        self.logo_ctk = ctk.CTkImage(light_image=logo_img, dark_image=logo_img, size=(36, 36))
-        
-        # Logoyu ve yazıyı ekrana bas
-        ctk.CTkLabel(header, image=self.logo_ctk, text="").pack(side="left", padx=(0, 10))
+        # --- KENDİ LOGOMUZU YÜKLEME ---
+        logo_path = os.path.join(BASE_DIR, "logo.png")
+        if os.path.exists(logo_path):
+            logo_img = Image.open(logo_path)
+            self.logo_ctk = ctk.CTkImage(light_image=logo_img, dark_image=logo_img, size=(36, 36))
+            ctk.CTkLabel(header, image=self.logo_ctk, text="").pack(side="left", padx=(0, 10))
+        else:
+            ctk.CTkLabel(header, text="🛡️", font=("Segoe UI", 24)).pack(side="left", padx=(0, 10))
+
         ctk.CTkLabel(header, text="NovaGuard", font=("Segoe UI", 28, "bold"), text_color="#ffffff").pack(side="left")
         ctk.CTkLabel(header, text="ULTIMATE", font=("Segoe UI", 12, "bold"), text_color="#ffaa00").pack(side="left", padx=10, pady=(10, 0))
 
@@ -130,12 +126,14 @@ class NovaGuardUI:
         self.ignore_box = ctk.CTkTextbox(self.tab_settings, height=150, font=("Consolas", 11))
         self.ignore_box.pack(fill="x", padx=20, pady=10)
 
-        from core.config import IGNORE_PATHS
         self.ignore_box.insert("end", "\n".join(IGNORE_PATHS))
 
         ctk.CTkButton(self.tab_settings, text="💾 Kaydet", fg_color="#238636", hover_color="#2ea043", command=self._save_ignores).pack(pady=10)
+        
+        ctk.CTkButton(self.tab_settings, text="🧹 Tarama Önbelleğini Sıfırla", 
+                      fg_color="#1f1f24", hover_color="#2a2a30",
+                      command=self._clear_cache).pack(pady=5)
 
-        # KALDIRMA BUTONU
         ctk.CTkLabel(self.tab_settings, text="").pack() 
         ctk.CTkButton(self.tab_settings, text="🗑️ NovaGuard'ı Kaldır", fg_color="#da3633", hover_color="#f85149", command=self._uninstall).pack(pady=20)
 
@@ -343,14 +341,22 @@ class NovaGuardUI:
 
     # ---------- AYARLAR ----------
     def _save_ignores(self):
-        from core.config import IGNORE_PATHS
         paths = self.ignore_box.get("1.0", "end").strip().split("\n")
-        IGNORE_PATHS.clear()
+        new_list = []
         for p in paths:
             p = p.strip()
             if p:
-                IGNORE_PATHS.append(p)
-        self.log(f"✅ İstisna listesi güncellendi ({len(IGNORE_PATHS)} giriş).")
+                new_list.append(p)
+        
+        save_ignores(new_list)
+        self.log(f"✅ İstisna listesi kalıcı olarak güncellendi ({len(new_list)} giriş).")
+
+    def _clear_cache(self):
+        try:
+            db.clear_cache()
+            self.log("🧹 Tarama önbelleği başarıyla temizlendi.")
+        except Exception as e:
+            self.log(f"❌ Önbellek temizlenemedi: {e}")
 
     def run(self):
         self._load_quarantine_list()

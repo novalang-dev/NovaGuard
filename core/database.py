@@ -10,6 +10,7 @@ class DatabaseManager:
     def __init__(self):
         self._init_signatures()
         self._init_history()
+        self._init_cache()
 
     def _connect(self, db_path):
         conn = sqlite3.connect(db_path, timeout=10)
@@ -19,11 +20,7 @@ class DatabaseManager:
     def _init_signatures(self):
         with self._lock:
             conn = self._connect(DB_PATH)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS signatures (
-                    sha256 TEXT PRIMARY KEY, name TEXT, level INTEGER
-                )
-            """)
+            conn.execute("CREATE TABLE IF NOT EXISTS signatures (sha256 TEXT PRIMARY KEY, name TEXT, level INTEGER)")
             conn.commit()
             conn.close()
 
@@ -35,6 +32,19 @@ class DatabaseManager:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     time TEXT, filename TEXT, path TEXT, 
                     threat_name TEXT, risk_score INTEGER, action TEXT
+                )
+            """)
+            conn.commit()
+            conn.close()
+
+    def _init_cache(self):
+        with self._lock:
+            conn = self._connect(HISTORY_DB_PATH)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS scan_cache (
+                    file_path TEXT PRIMARY KEY, 
+                    file_hash TEXT, 
+                    last_modified REAL
                 )
             """)
             conn.commit()
@@ -74,5 +84,34 @@ class DatabaseManager:
         rows = cur.fetchall()
         conn.close()
         return rows
+
+    # --- Önbellek İşlemleri ---
+    def check_cache(self, file_path, file_hash, last_modified):
+        try:
+            conn = self._connect(HISTORY_DB_PATH)
+            cur = conn.execute("SELECT file_hash FROM scan_cache WHERE file_path=? AND last_modified=?", (file_path, last_modified))
+            row = cur.fetchone()
+            conn.close()
+            return row is not None and row[0] == file_hash
+        except: return False
+
+    def add_to_cache(self, file_path, file_hash, last_modified):
+        with self._lock:
+            try:
+                conn = self._connect(HISTORY_DB_PATH)
+                conn.execute("INSERT OR REPLACE INTO scan_cache (file_path, file_hash, last_modified) VALUES (?,?,?)", 
+                             (file_path, file_hash, last_modified))
+                conn.commit()
+                conn.close()
+            except: pass
+
+    def clear_cache(self):
+        with self._lock:
+            try:
+                conn = self._connect(HISTORY_DB_PATH)
+                conn.execute("DELETE FROM scan_cache")
+                conn.commit()
+                conn.close()
+            except: pass
 
 db = DatabaseManager()

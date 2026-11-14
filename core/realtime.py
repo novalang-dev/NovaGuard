@@ -2,23 +2,23 @@
 """Gerçek Zamanlı İzleme (Watchdog) - İstisna ve Oyun Modu destekli."""
 import threading
 import os
+import core.config as config  # Modülü import et
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-from core.config import WATCH_PATHS, IGNORE_PATHS
+from core.config import WATCH_PATHS
 
 # Oyun modu global state
 class State:
     game_mode = False
 
-
 def is_ignored(path):
-    """Dosya yolu istisna listesindeyse True döner."""
+    """Dosya yolu istisna listesindeyse True döner. (Dinamik okuma)"""
     try:
         p = path.lower()
-        return any(p.startswith(ig.lower()) for ig in IGNORE_PATHS)
+        # Her seferinde config içindeki en güncel IGNORE_PATHS listesini oku
+        return any(p.startswith(ig.lower()) for ig in config.IGNORE_PATHS)
     except Exception:
         return False
-
 
 class _Handler(FileSystemEventHandler):
     def __init__(self, callback):
